@@ -175,6 +175,11 @@ h1{font-size:26px;font-weight:600;letter-spacing:.02em;margin-top:2px}
 .hint{font-size:12.5px;color:var(--muted);line-height:1.85}
 .hint code{background:var(--bg);padding:2px 5px;border-radius:4px;font-size:11.5px;word-break:break-all}
 .hint a{color:var(--accent)}
+.sect{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.sect h2{margin-bottom:10px}
+.sw{display:flex;align-items:center;gap:9px;font-size:13.5px;color:var(--ink);
+  padding:6px 0;cursor:pointer;user-select:none}
+.sw input{width:19px;height:19px;accent-color:var(--accent);flex:0 0 auto}
 .row{display:flex;gap:8px;margin-top:12px}
 .primary{flex:1;background:var(--accent);color:#fff;border-radius:8px;padding:12px;font-size:14px}
 .primary:active{opacity:.85}
@@ -279,6 +284,7 @@ const LS_TOKEN = 'daily_routine_token';
 const LS_GIST  = 'daily_routine_gist';
 const LS_DEV   = 'daily_routine_device';
 const LS_RUN   = 'daily_routine_running';
+const LS_WAKE  = 'daily_routine_wakelock';
 const GIST_FILE = 'daily-routine.json';
 const GIST_DESC = 'daily-routine sync — 每日修行数据，请勿删除';
 const API = 'https://api.github.com';
@@ -550,11 +556,46 @@ function renderSettings() {
       <button class="primary" id="connect">连接</button>
       <button class="ghost" id="disconnect">断开</button>
     </div>
-    <div class="hint" id="gistInfo" style="margin-top:12px"></div>`;
+    <div class="hint" id="gistInfo" style="margin-top:12px"></div>
+
+    <div class="sect">
+      <h2>到点提醒</h2>
+      <label class="sw"><input type="checkbox" id="wakeCb"> 计时时保持屏幕常亮</label>
+      <div class="hint" id="notifyState" style="margin-top:8px"></div>
+    </div>`;
   document.getElementById('tokenIn').value = token;
   document.getElementById('connect').onclick = doConnect;
   document.getElementById('disconnect').onclick = doDisconnect;
+
+  const cb = document.getElementById('wakeCb');
+  cb.checked = wakeOn;
+  cb.onchange = () => {
+    wakeOn = cb.checked;
+    localStorage.setItem(LS_WAKE, wakeOn ? '1' : '0');
+    if (running) setWake(wakeOn); else setWake(false);
+    toast(wakeOn ? '计时时屏幕不会自动熄灭' : '已关闭屏幕常亮');
+  };
+  paintNotifyState();
   paintGistInfo();
+}
+
+function paintNotifyState() {
+  const el = document.getElementById('notifyState');
+  if (!el) return;
+  if (!('Notification' in window)) { el.textContent = '这个浏览器不支持系统通知'; return; }
+  if (Notification.permission === 'granted') {
+    el.innerHTML = '✓ 已允许系统通知，到点会弹提醒并震动';
+  } else if (Notification.permission === 'denied') {
+    el.innerHTML = '系统通知被拒绝了。想要到点提醒，需要在浏览器的' +
+                   '「网站设置 → 通知」里重新允许。';
+  } else {
+    el.innerHTML = '<button class="ghost" id="askN" style="padding:8px 14px">开启到点提醒</button>';
+    document.getElementById('askN').onclick = async () => {
+      const okd = await askNotify();
+      toast(okd ? '已开启，到点会弹通知' : '没有授权，只能靠声音提醒');
+      paintNotifyState();
+    };
+  }
 }
 function paintGistInfo() {
   const el = document.getElementById('gistInfo');
@@ -844,8 +885,8 @@ function saveRun() {
   else localStorage.removeItem(LS_RUN);
 }
 
-function startRun(k) { running = k; lastTick = Date.now(); saveRun(); }
-function stopRun()    { running = null; saveRun(); }
+function startRun(k) { running = k; lastTick = Date.now(); saveRun(); scheduleAlarm(); }
+function stopRun()    { running = null; saveRun(); scheduleAlarm(); }
 
 // 把从 lastTick 到现在的真实时长记上；跨过目标就只补到刚好完成
 function commit(now) {
@@ -861,7 +902,7 @@ function commit(now) {
   if (cur < goal && cur + delta >= goal) {
     addSec(t.k, goal - cur);                // 只补到达标为止，多的不算
     stopRun();
-    ding(); toast(`${t.name} 完成了`);
+    onComplete(t);
     render(); scheduleSync();
   } else {
     addSec(t.k, delta);
@@ -892,7 +933,9 @@ document.getElementById('list').addEventListener('click', e => {
   commit(Date.now());                       // 切换前先把已跑的时间落账
   switch (btn.dataset.act) {
     case 'toggle':
-      if (running === k) stopRun(); else startRun(k);
+      if (running === k) stopRun();
+      // 借这一下点击解锁音频、顺便要通知权限，之后才能在后台响
+      else { unlockAudio(); askNotify(); startRun(k); }
       break;
     case 'done':
       setSec(k, val(k) >= t.target*60 ? 0 : t.target*60);
@@ -905,6 +948,7 @@ document.getElementById('list').addEventListener('click', e => {
       break;
   }
   render(); scheduleSync();
+  scheduleAlarm();          // +5/清零/标记完成都会改变剩余时长，闹钟要重挂
 });
 
 document.getElementById('toggleEdit').onclick = () => {
@@ -930,7 +974,8 @@ function renderEditor() {
     nameIn.oninput = () => { t.name = nameIn.value; state.tasksAt = Date.now(); touch(); render(); scheduleSync(); };
     minIn.onchange = () => {
       t.target = Math.max(1, Math.min(600, +minIn.value || 1));
-      minIn.value = t.target; state.tasksAt = Date.now(); touch(); render(); scheduleSync();
+      minIn.value = t.target; state.tasksAt = Date.now(); touch();
+      render(); scheduleSync(); scheduleAlarm();     // 目标时长变了，闹钟要重挂
     };
     row.querySelector('.del').onclick = () => {
       if (!confirm(`删除「${t.name}」？`)) return;
@@ -963,26 +1008,141 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.remove('on'), 2400);
 }
 
-function ding() {
+/* ================= 到点提醒 =================
+   手机锁屏或切到别的 app 后，浏览器会冻结页面，setInterval 停摆，
+   到点那一刻根本没有代码在跑 —— 所以光靠每秒的 tick 是响不了的。
+   三层保险：
+     1. 计时期间循环播一段无声音频，让系统认为页面在放东西，别冻结它
+     2. 按剩余时长挂一个精确的 setTimeout，到点直接响 + 发系统通知
+     3. 万一还是被冻结了，回到页面时按真实时钟补记，并补响一次
+*/
+let audioCtx = null, keepEl = null, alarmTimer = null, wakeLock = null;
+let wakeOn = localStorage.getItem(LS_WAKE) === '1';
+
+// 必须借用户点 ▶ 的那一下手势解锁音频，之后才允许出声
+function unlockAudio() {
   try {
-    const ac = new (window.AudioContext || window.webkitAudioContext)();
-    [880, 1320].forEach((f, i) => {
-      const o = ac.createOscillator(), g = ac.createGain();
-      o.frequency.value = f; o.type = 'sine';
-      g.gain.setValueAtTime(0.001, ac.currentTime + i*0.16);
-      g.gain.exponentialRampToValueAtTime(0.25, ac.currentTime + i*0.16 + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.001, ac.currentTime + i*0.16 + 0.5);
-      o.connect(g); g.connect(ac.destination);
-      o.start(ac.currentTime + i*0.16); o.stop(ac.currentTime + i*0.16 + 0.5);
-    });
-    if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
   } catch (e) {}
 }
+
+// 现造一段 1 秒的无声 wav，省得依赖外部文件
+function silentWav() {
+  const rate = 8000, n = rate;
+  const buf = new ArrayBuffer(44 + n), v = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + n, true); w(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true); v.setUint32(28, rate, true);
+  v.setUint16(32, 1, true); v.setUint16(34, 8, true);
+  w(36, 'data'); v.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) v.setUint8(44 + i, 128);      // 8 位无声 = 128
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+function keepAlive(on) {
+  try {
+    if (on) {
+      if (keepEl) return;
+      keepEl = new Audio(silentWav());
+      keepEl.loop = true;
+      keepEl.volume = 0.001;          // 真的填 0，有些机型会把它优化掉
+      keepEl.play().catch(() => {});
+    } else if (keepEl) {
+      keepEl.pause(); keepEl.src = ''; keepEl = null;
+    }
+  } catch (e) {}
+}
+
+async function setWake(on) {
+  try {
+    if (on && 'wakeLock' in navigator) {
+      if (!wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      }
+    } else if (wakeLock) {
+      const w = wakeLock; wakeLock = null; await w.release();
+    }
+  } catch (e) { wakeLock = null; }
+}
+
+// 按剩余时长挂一个精确闹钟；每次时长有变动都要重挂
+function scheduleAlarm() {
+  clearTimeout(alarmTimer); alarmTimer = null;
+  if (!running) { keepAlive(false); setWake(false); return; }
+  const t = state.tasks.find(x => x.k === running);
+  if (!t) { keepAlive(false); setWake(false); return; }
+  const left = t.target * 60 - val(t.k);
+  if (left <= 0) return;
+  keepAlive(true);
+  setWake(wakeOn);        // 无条件同步，关掉常亮时也能把已申请的锁释放掉
+  // 到点让 commit 去判定完成，跟正常路径走同一套逻辑
+  alarmTimer = setTimeout(() => { commit(Date.now()); render(); }, left * 1000 + 200);
+}
+
+async function askNotify() {
+  if (!('Notification' in window)) return false;
+  if (Notification.permission === 'granted') return true;
+  if (Notification.permission === 'denied') return false;
+  try { return (await Notification.requestPermission()) === 'granted'; } catch (e) { return false; }
+}
+
+function notify(name) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const opt = {
+    body: '这一项做完了',
+    tag: 'daily-routine-done', renotify: true, requireInteraction: true,
+    vibrate: [200, 100, 200, 100, 200],
+    icon: 'icon-192.png', badge: 'icon-192.png',
+  };
+  // 安卓上必须经由 service worker 弹，直接 new Notification 会抛错
+  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+    navigator.serviceWorker.ready
+      .then(r => r.showNotification(`${name} 完成了`, opt))
+      .catch(() => { try { new Notification(`${name} 完成了`, opt); } catch (e) {} });
+  } else {
+    try { new Notification(`${name} 完成了`, opt); } catch (e) {}
+  }
+}
+
+function ding() {
+  try {
+    unlockAudio();
+    const ac = audioCtx;
+    if (ac) {
+      const t0 = ac.currentTime;
+      for (let r = 0; r < 3; r++) {                 // 响三轮，一声容易漏听
+        [880, 1320].forEach((f, i) => {
+          const at = t0 + r * 0.75 + i * 0.18;
+          const o = ac.createOscillator(), g = ac.createGain();
+          o.frequency.value = f; o.type = 'sine';
+          g.gain.setValueAtTime(0.0001, at);
+          g.gain.exponentialRampToValueAtTime(0.5, at + 0.02);
+          g.gain.exponentialRampToValueAtTime(0.0001, at + 0.55);
+          o.connect(g); g.connect(ac.destination);
+          o.start(at); o.stop(at + 0.6);
+        });
+      }
+    }
+  } catch (e) {}
+  try { if (navigator.vibrate) navigator.vibrate([200, 100, 200, 100, 400]); } catch (e) {}
+}
+
+function onComplete(t) { ding(); toast(`${t.name} 完成了`); notify(t.name); }
 
 /* ================= 生命周期 ================= */
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) { commit(Date.now()); saveLocal(); saveRun(); }
-  else { lastTick = Date.now(); commit(lastTick); render(); sync(); }
+  else {
+    // 这里千万不能先重置 lastTick —— 那样时间差归零，
+    // 切后台的这段时长就全丢了。直接 commit，让它按真实时钟补。
+    commit(Date.now());
+    render(); sync();
+    scheduleAlarm();        // 后台期间挂的定时器可能已被系统清掉，重挂一次
+    if (running && wakeOn) setWake(true);
+  }
 });
 window.addEventListener('pagehide', () => { commit(Date.now()); saveLocal(); saveRun(); });
 window.addEventListener('focus',  sync);
@@ -1014,7 +1174,10 @@ ensureDay();
   if (gap <= 0 || gap > MAX_GAP) { localStorage.removeItem(LS_RUN); return; }
   running = r.k; lastTick = r.at;
   commit(Date.now());
-  if (running) { saveRun(); setTimeout(() => toast(`继续计时，已补上离开的 ${Math.round(gap/60)} 分钟`), 600); }
+  if (running) {
+    saveRun(); scheduleAlarm();
+    setTimeout(() => toast(`继续计时，已补上离开的 ${Math.round(gap/60)} 分钟`), 600);
+  }
 })();
 
 render();
