@@ -346,6 +346,55 @@ function blank() {
   };
 }
 
+/* 同名任务去重。
+   老版本每次生成默认清单都用随机 key，三个网址就攒出三套
+   「练字/练字/练字」。按 key 合并时它们互不相识，于是全都留下来了。
+   这里按名字归并：留修改时间晚的那条，被淘汰那条的时长并进去，一分钟都不丢。 */
+function mergeProg(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const e = { epoch: Math.max(a.epoch || 0, b.epoch || 0), dev: {} };
+  const ids = new Set([...Object.keys(a.dev || {}), ...Object.keys(b.dev || {})]);
+  for (const id of ids) {
+    const xa = a.dev?.[id], xb = b.dev?.[id];
+    // 同一设备在两条上都记过 —— 本来就是同一件事被拆成两条，所以相加
+    e.dev[id] = !xa ? xb : !xb ? xa
+              : { s: xa.s + xb.s, at: Math.max(xa.at, xb.at) };
+  }
+  return e;
+}
+
+function absorb(s, fromK, toK) {
+  for (const dt in s.days) {
+    const day = s.days[dt];
+    if (day.p && day.p[fromK]) {
+      day.p[toK] = mergeProg(day.p[toK], day.p[fromK]);
+      delete day.p[fromK];
+    }
+    if (day.goals && day.goals[fromK] != null) {
+      if (day.goals[toK] == null) day.goals[toK] = day.goals[fromK];
+      delete day.goals[fromK];
+    }
+  }
+}
+
+function dedupe(s) {
+  const byName = new Map();
+  for (const t of s.tasks) {
+    const n = (t.name || '').trim();
+    const p = byName.get(n);
+    if (!p) { byName.set(n, t); continue; }
+    // 留修改时间晚的；时间一样就留 key 字典序小的，保证各设备算出同一个结果
+    const tWins = (t.at > p.at) || (t.at === p.at && t.k < p.k);
+    const win = tWins ? t : p, lose = tWins ? p : t;
+    byName.set(n, win);
+    absorb(s, lose.k, win.k);
+    s.dead[lose.k] = Math.max(s.dead[lose.k] || 0, Date.now());
+  }
+  s.tasks = [...byName.values()].sort((x, y) => (x.ord - y.ord) || (x.at - y.at));
+  return s;
+}
+
 // 老数据里每条任务没有自己的 at，用整份清单的 tasksAt 顶上
 function normTasks(s) {
   const base = s.tasksAt || 0;
@@ -361,7 +410,7 @@ function load() {
   if (!s || s.v !== 2) s = blank();
   s.days = s.days || {}; s.legacy = s.legacy || {}; s.dead = s.dead || {};
   s.tasks = normTasks(s);          // 补齐每条任务的 at / ord
-  return s;
+  return dedupe(s);                // 清掉历史遗留的同名重复
 }
 
 let state = load();
@@ -473,6 +522,8 @@ function merge(a, b) {
   const cutK = dkey(cut);
   for (const dt in out.days)   if (dt < cutK) delete out.days[dt];
   for (const dt in out.legacy) if (dt < cutK) delete out.legacy[dt];
+  // 合并完再去一次重：两边各自带来的同名任务只有到这一步才碰面
+  dedupe(out);
   // 墓碑也别攒着；400 天后所有设备早就同步过了
   const cutMs = Date.now() - 400 * 24 * 3600 * 1000;
   for (const k in out.dead) if (out.dead[k] < cutMs) delete out.dead[k];
