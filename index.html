@@ -13,7 +13,9 @@
 <!-- 托管到 https 时这两个才生效，本地双击打开会 404，无妨 -->
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23c2703d'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-dasharray='85 113' transform='rotate(-90 32 32)'/%3E%3C/svg%3E">
-<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23c2703d'/%3E%3Ccircle cx='32' cy='32' r='18' fill='none' stroke='%23fff' stroke-width='5' stroke-linecap='round' stroke-dasharray='85 113' transform='rotate(-90 32 32)'/%3E%3C/svg%3E">
+<!-- iOS 的桌面图标只认 PNG，给 SVG 的话会变成空白或网页截图 -->
+<link rel="apple-touch-icon" sizes="180x180" href="icon-180.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
 :root{
   --bg:#f5f4f0; --card:#fffefb; --ink:#1c1b19; --muted:#8a857c;
