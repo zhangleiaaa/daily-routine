@@ -321,8 +321,8 @@ if (!DEV) { DEV = uid(); localStorage.setItem(LS_DEV, DEV); }
 /* =================== 数据模型 ===================
 state = {
   v: 2,
-  tasks:   [{ k, name, target }],
-  tasksAt: 时间戳,                       // 任务清单整体后写覆盖
+  tasks: [{ k, name, target, at, ord }],   // at = 这一条自己的修改时间，ord = 排序
+  dead:  { k: 删除时间 },                   // 删除墓碑
   days: {
     'YYYY-MM-DD': {
       goals: { k: 分钟 },                // 当天目标快照
@@ -333,17 +333,34 @@ state = {
 }
 每台设备只写自己那份 dev[DEV]，合并时相加而不是互相覆盖。
 清零 / 标记完成 会把 epoch 推到当前时间，早于 epoch 的贡献一律作废。
+任务清单按单条合并：谁改得晚谁说了算，删除靠墓碑，见 merge()。
 ================================================== */
 
+// 默认任务用固定 key。用随机 key 的话，两台新设备各生成一套，
+// 合并后会变成两份重复的任务。
 function blank() {
-  return { v:2, tasksAt: Date.now(), days:{}, legacy:{},
-           tasks: DEFAULTS.map(t => ({ k: uid(), ...t })) };
+  return {
+    v: 2, tasksAt: 0, days: {}, legacy: {}, dead: {},
+    // at 全为 0 = 还没被人动过。只要别处有真正编辑过的清单，这份就整个让位。
+    tasks: DEFAULTS.map((t, i) => ({ k: 'd' + (i + 1), ...t, at: 0, ord: i })),
+  };
+}
+
+// 老数据里每条任务没有自己的 at，用整份清单的 tasksAt 顶上
+function normTasks(s) {
+  const base = s.tasksAt || 0;
+  return (s.tasks || []).map((t, i) => ({
+    k: t.k, name: t.name, target: t.target,
+    at:  t.at  != null ? t.at  : base,
+    ord: t.ord != null ? t.ord : i,
+  }));
 }
 
 function load() {
   let s; try { s = JSON.parse(localStorage.getItem(LS)); } catch(e) { s = null; }
   if (!s || s.v !== 2) s = blank();
-  s.days = s.days || {}; s.legacy = s.legacy || {}; s.tasks = s.tasks || [];
+  s.days = s.days || {}; s.legacy = s.legacy || {}; s.dead = s.dead || {};
+  s.tasks = normTasks(s);          // 补齐每条任务的 at / ord
   return s;
 }
 
@@ -403,9 +420,34 @@ function setSec(k, sec) {
 
 /* ---------- 合并（本地 ⊕ 云端） ---------- */
 function merge(a, b) {
-  const out = { v:2, tasks:[], tasksAt:0, days:{}, legacy:{} };
-  if ((b.tasksAt||0) > (a.tasksAt||0)) { out.tasks = b.tasks || []; out.tasksAt = b.tasksAt||0; }
-  else { out.tasks = a.tasks || []; out.tasksAt = a.tasksAt||0; }
+  const out = { v:2, tasks:[], tasksAt:0, days:{}, legacy:{}, dead:{} };
+
+  /* 任务清单按单条合并。
+     以前是整份后写覆盖，有两个后果：
+       · 一台刚装好的设备（换网址、清缓存）带着"当前时间"的清单一上来，
+         就把你真正的编辑全盖掉了；
+       · 某台设备拿着旧清单改一下，会把别处新增的任务连带抹掉。
+     现在每条任务各带修改时间，谁改得晚谁说了算；删除留墓碑。 */
+  let listA = normTasks(a), listB = normTasks(b);
+  const realA = listA.some(t => t.at > 0);
+  const realB = listB.some(t => t.at > 0);
+  // 没人动过的默认清单，遇到真正编辑过的一方就整个让位，
+  // 免得默认任务和用户任务混在一起变成重复项
+  if (realA && !realB) listB = [];
+  if (realB && !realA) listA = [];
+
+  const byK = {};
+  for (const t of listA) byK[t.k] = t;
+  for (const t of listB) { const p = byK[t.k]; if (!p || t.at > p.at) byK[t.k] = t; }
+
+  const dead = { ...(a.dead || {}) };
+  for (const k in (b.dead || {})) dead[k] = Math.max(dead[k] || 0, b.dead[k]);
+  out.dead = dead;
+  out.tasks = Object.values(byK)
+    .filter(t => !((dead[t.k] || 0) > t.at))     // 删除时间晚于最后修改 → 确实删了
+    .sort((x, y) => (x.ord - y.ord) || (x.at - y.at));
+  out.tasksAt = Math.max(a.tasksAt || 0, b.tasksAt || 0);
+
   for (const d in (a.legacy||{})) out.legacy[d] = a.legacy[d];
   for (const d in (b.legacy||{})) out.legacy[d] = Math.max(out.legacy[d]||0, b.legacy[d]);
   const dates = new Set([...Object.keys(a.days||{}), ...Object.keys(b.days||{})]);
@@ -431,6 +473,9 @@ function merge(a, b) {
   const cutK = dkey(cut);
   for (const dt in out.days)   if (dt < cutK) delete out.days[dt];
   for (const dt in out.legacy) if (dt < cutK) delete out.legacy[dt];
+  // 墓碑也别攒着；400 天后所有设备早就同步过了
+  const cutMs = Date.now() - 400 * 24 * 3600 * 1000;
+  for (const k in out.dead) if (out.dead[k] < cutMs) delete out.dead[k];
   return out;
 }
 
@@ -971,25 +1016,31 @@ function renderEditor() {
       <span style="font-size:12px;color:var(--muted)">分钟</span>
       <button class="del" aria-label="删除">×</button>`;
     const [nameIn, minIn] = row.querySelectorAll('input');
-    nameIn.oninput = () => { t.name = nameIn.value; state.tasksAt = Date.now(); touch(); render(); scheduleSync(); };
+    // 改动只打在这一条上，不动别的任务 —— 否则会把别处的新增覆盖掉
+    nameIn.oninput = () => {
+      t.name = nameIn.value; t.at = Date.now();
+      touch(); render(); scheduleSync();
+    };
     minIn.onchange = () => {
       t.target = Math.max(1, Math.min(600, +minIn.value || 1));
-      minIn.value = t.target; state.tasksAt = Date.now(); touch();
+      minIn.value = t.target; t.at = Date.now(); touch();
       render(); scheduleSync(); scheduleAlarm();     // 目标时长变了，闹钟要重挂
     };
     row.querySelector('.del').onclick = () => {
       if (!confirm(`删除「${t.name}」？`)) return;
       state.tasks = state.tasks.filter(x => x.k !== t.k);
+      state.dead[t.k] = Date.now();       // 留墓碑，别的设备才知道这是删了不是没同步到
       if (running === t.k) stopRun();
-      state.tasksAt = Date.now(); ensureDay(); touch(); render(); renderEditor(); scheduleSync();
+      ensureDay(); touch(); render(); renderEditor(); scheduleSync();
     };
     box.appendChild(row);
   });
 }
 
 document.getElementById('addTask').onclick = () => {
-  state.tasks.push({ k: uid(), name: '新任务', target: 15 });
-  state.tasksAt = Date.now(); touch(); render(); renderEditor(); scheduleSync();
+  const ord = Math.max(-1, ...state.tasks.map(t => t.ord || 0)) + 1;
+  state.tasks.push({ k: uid(), name: '新任务', target: 15, at: Date.now(), ord });
+  touch(); render(); renderEditor(); scheduleSync();
   document.querySelector('#editRows .edit-row:last-child .n').select();
 };
 
