@@ -1,6 +1,6 @@
-/* 每日修行 —— 离线缓存
+﻿/* 每日修行 —— 离线缓存
    改 CACHE 后面的版本号可以强制所有设备重新缓存。 */
-const CACHE = 'daily-routine-v2';
+const CACHE = 'daily-routine-v3';
 const ASSETS = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
