@@ -363,8 +363,10 @@ function mergeProg(a, b) {
   const ids = new Set([...Object.keys(a.dev || {}), ...Object.keys(b.dev || {})]);
   for (const id of ids) {
     const xa = a.dev?.[id], xb = b.dev?.[id];
-    // 同一设备在两条上都记过 —— 本来就是同一件事被拆成两条，所以相加
+    // at 完全相同 = 同一条记录被复制成了两份（历史上换 key 留下的），取一份就好；
+    // at 不同才是同一设备真的分两次记过，那才该相加。
     e.dev[id] = !xa ? xb : !xb ? xa
+              : xa.at === xb.at ? xa
               : { s: xa.s + xb.s, at: Math.max(xa.at, xb.at) };
   }
   return e;
