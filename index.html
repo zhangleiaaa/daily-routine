@@ -287,7 +287,11 @@ const LS_GIST  = 'daily_routine_gist';
 const LS_DEV   = 'daily_routine_device';
 const LS_RUN   = 'daily_routine_running';
 const LS_WAKE  = 'daily_routine_wakelock';
-const GIST_FILE = 'daily-routine.json';
+/* 换了文件名，跟旧版本彻底隔离。
+   旧版本的合并是整份覆盖，而且不认识 dead 字段，只要还有一台设备开着老页面，
+   它一同步就会把新数据连同墓碑一起冲掉。让它继续去写它的旧文件，互不干扰。 */
+const GIST_FILE     = 'daily-routine-v3.json';
+const GIST_FILE_OLD = 'daily-routine.json';   // 只在新文件还不存在时读一次，之后不再碰
 const GIST_DESC = 'daily-routine sync — 每日修行数据，请勿删除';
 const API = 'https://api.github.com';
 
@@ -558,7 +562,8 @@ async function api(path, opts = {}) {
 }
 async function findOrCreateGist() {
   const list = await api('/gists?per_page=100');
-  const hit = list.find(g => g.files && g.files[GIST_FILE]);
+  // 认新旧两个文件名，免得换名之后找不到原来那个 Gist 又新建一个
+  const hit = list.find(g => g.files && (g.files[GIST_FILE] || g.files[GIST_FILE_OLD]));
   if (hit) return hit.id;
   const g = await api('/gists', { method:'POST', body: JSON.stringify({
     description: GIST_DESC, public:false,
@@ -568,7 +573,9 @@ async function findOrCreateGist() {
 }
 async function remoteGet() {
   const g = await api('/gists/' + gistId);
-  const f = g.files?.[GIST_FILE];
+  // 新文件优先。只有它还不存在时才回退去读旧文件，把数据搬一次；
+  // 之后新文件一直在，就再也不会去读旧的了。
+  const f = g.files?.[GIST_FILE] || g.files?.[GIST_FILE_OLD];
   if (!f) return null;
   const text = f.truncated ? await (await fetch(f.raw_url)).text() : f.content;
   const d = JSON.parse(text);
